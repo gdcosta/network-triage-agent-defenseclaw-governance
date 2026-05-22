@@ -1,0 +1,62 @@
+# Cilium Gateway + HTTPRoute for the KL Triage Bot chat surface.
+#
+# These two resources carry the only environment-specific value in the whole
+# deployment: BOT_HOSTNAME (the public subdomain Bot Framework POSTs to). They
+# live in their own file — split out of deployment.yaml — so that deployment.yaml
+# stays placeholder-free and re-appliable without any sed/edit step.
+#
+# The Gateway rarely changes, so this is a one-time apply. To use it:
+#   1. cp k8s/gateway.example.yaml k8s/gateway.yaml
+#   2. set BOT_HOSTNAME in gateway.yaml to your subdomain (e.g. kl-triage-bot.example.com)
+#   3. kubectl apply -f k8s/gateway.yaml
+# gateway.yaml (with the real hostname) is gitignored; only this .example is committed.
+#
+# The Cilium Gateway terminates HTTPS on :443 with the *.example.com wildcard
+# cert (kubernetes.io/tls Secret wildcard-tls). The :80 listener is kept
+# for in-cluster testing / liveness probes.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: kl-openclaw-gateway
+  namespace: kl-governance
+spec:
+  gatewayClassName: cilium
+  listeners:
+    # In-cluster / fallback HTTP — accepts any host header
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+    # Public HTTPS — what Bot Framework hits
+    - name: https
+      port: 443
+      protocol: HTTPS
+      hostname: BOT_HOSTNAME       # set to your subdomain (e.g. kl-triage-bot.example.com)
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: wildcard-tls
+            # namespace omitted = same ns as the Gateway
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kl-openclaw-msteams
+  namespace: kl-governance
+spec:
+  parentRefs:
+    - name: kl-openclaw-gateway
+      # Attach to both listeners so the same backend serves HTTP + HTTPS
+  hostnames:
+    - BOT_HOSTNAME                  # must match the HTTPS listener hostname above
+  rules:
+    - backendRefs:
+        - name: kl-openclaw
+          port: 80

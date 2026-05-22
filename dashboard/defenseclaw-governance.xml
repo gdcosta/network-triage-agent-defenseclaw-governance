@@ -1,0 +1,331 @@
+<form version="1.1" theme="dark">
+  <label>AI Agent &amp; Bot Governance — DefenseClaw</label>
+  <description>Reusable governance view for every AI agent and bot reporting to index=defenseclaw_audit. Agents are auto-discovered from agent_name — no per-agent edits needed. Use the Agent / Bot filter to focus on one workload or view all; blocks and prompt-injection alerts are always attributed to the agent that triggered them.</description>
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="tr" searchWhenChanged="true">
+      <label>Time Range</label>
+      <default>
+        <earliest>-24h@h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="dropdown" token="agent_tok" searchWhenChanged="true">
+      <label>Agent / Bot</label>
+      <fieldForLabel>agent_name</fieldForLabel>
+      <fieldForValue>agent_name</fieldForValue>
+      <search>
+        <query>index=defenseclaw_audit agent_name=* | stats count by agent_name | sort -count</query>
+        <earliest>-7d</earliest>
+        <latest>now</latest>
+      </search>
+      <choice value="*">All agents</choice>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="dropdown" token="span" searchWhenChanged="true">
+      <label>Time Granularity</label>
+      <choice value="10s">10 Seconds</choice>
+      <choice value="30s">30 Seconds</choice>
+      <choice value="1m">1 Minute</choice>
+      <choice value="15m">15 Minutes</choice>
+      <choice value="30m">30 Minutes</choice>
+      <choice value="1h">1 Hour</choice>
+      <choice value="1d">Daily</choice>
+      <choice value="1w">Weekly</choice>
+      <choice value="1mon">Monthly</choice>
+      <default>1h</default>
+      <initialValue>1h</initialValue>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <html>
+        <div style="background: linear-gradient(135deg, #1F3864 0%, #2E75B6 100%); padding: 22px 30px; border-radius: 6px;">
+          <h1 style="margin:0 0 6px 0; font-size:24px; font-weight:700; color:#FFFFFF !important;">AI Agent &amp; Bot Governance</h1>
+          <p style="margin:0; font-size:13px; line-height:1.5; color:#FFFFFF !important;">DefenseClaw inspects every LLM prompt and tool call before it runs. This view auto-discovers each agent/bot from its <code style="color:#000000 !important;">agent_name</code> — filter to one workload above, or leave on <b>All agents</b>. Blocks and prompt-injection alerts are attributed to the agent that triggered them.</p>
+        </div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <html>
+        <div style="background:#22324A; border-left:5px solid #2E75B6; padding:12px 18px; border-radius:4px;">
+          <h3 style="margin:0 0 4px 0; color:#FFFFFF !important; font-size:14px;">At a glance — volume &amp; enforcement</h3>
+          <p style="margin:0; color:#C9D6E5 !important; font-size:12.5px; line-height:1.55;">How much LLM activity DefenseClaw is vetting and what it caught, for the selected agent (or all). <b>Blocked Calls</b> and <b>Prompt-Injection Alerts</b> are the wins — attacks stopped before they execute; <b>Avg Inspect Latency</b> is the overhead each check adds.</p>
+        </div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Tool Inspections</title>
+      <single>
+        <search>
+          <query>index=defenseclaw_audit action=inspect-tool-* agent_name="$agent_tok$" | stats count as value | table value</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="numberPrecision">0</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Blocked Calls</title>
+      <single>
+        <search>
+          <query>index=defenseclaw_audit action=inspect-tool-block agent_name="$agent_tok$" | stats count as value | table value</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x53A051","0xDC4E41"]</option>
+        <option name="rangeValues">[1]</option>
+        <option name="useColors">1</option>
+        <option name="numberPrecision">0</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Prompt-Injection Alerts</title>
+      <single>
+        <search>
+          <query>index=defenseclaw_audit action=gateway-session-prompt-alert agent_name="$agent_tok$" | stats count as value | table value</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x53A051","0xF1813F"]</option>
+        <option name="rangeValues">[1]</option>
+        <option name="useColors">1</option>
+        <option name="numberPrecision">0</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Avg Inspect Latency</title>
+      <single>
+        <search>
+          <query>index=defenseclaw_audit action=inspect-tool-* agent_name="$agent_tok$" | rex field=details "elapsed=(?&lt;elapsed_ms&gt;[0-9.]+)ms" | stats avg(elapsed_ms) as value | eval value=round(value,1) | table value</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="unit">ms</option>
+        <option name="unitPosition">after</option>
+        <option name="numberPrecision">0.0</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <html>
+        <div style="background:#22324A; border-left:5px solid #DC4E41; padding:12px 18px; border-radius:4px;">
+          <h3 style="margin:0 0 4px 0; color:#FFFFFF !important; font-size:14px;">Which agent triggered it</h3>
+          <p style="margin:0; color:#C9D6E5 !important; font-size:12.5px; line-height:1.55;">The headline security signals, broken out by the agent that produced them. These always show every agent (ignoring the filter) so a single bar standing out tells you exactly which workload is under attack or misbehaving.</p>
+        </div>
+      </html>
+    </panel>
+    <panel>
+      <html>
+        <div style="background:#22324A; border-left:5px solid #F1813F; padding:12px 18px; border-radius:4px;">
+          <h3 style="margin:0 0 4px 0; color:#FFFFFF !important; font-size:14px;">Attribution is the point</h3>
+          <p style="margin:0; color:#C9D6E5 !important; font-size:12.5px; line-height:1.55;">A count of "3 prompt-injection alerts" isn't actionable on its own — you need to know <i>who</i>. User-facing bots are higher-risk than autonomous agents, so a spike on a bot warrants different attention than one on a back-end agent.</p>
+        </div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Blocked Tool-Calls by Agent</title>
+      <chart>
+        <search>
+          <query>index=defenseclaw_audit action=inspect-tool-block agent_name=* | stats count as Blocks by agent_name | rename agent_name as Agent | sort -Blocks</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.legend.placement">none</option>
+        <option name="charting.seriesColors">[0xDC4E41]</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Prompt-Injection Alerts by Agent</title>
+      <chart>
+        <search>
+          <query>index=defenseclaw_audit action=gateway-session-prompt-alert agent_name=* | stats count as Alerts by agent_name | rename agent_name as Agent | sort -Alerts</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.legend.placement">none</option>
+        <option name="charting.seriesColors">[0xF1813F]</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <html>
+        <div style="background:#22324A; border-left:5px solid #2E75B6; padding:12px 18px; border-radius:4px;">
+          <h3 style="margin:0 0 4px 0; color:#FFFFFF !important; font-size:14px;">Enforcement in real time</h3>
+          <p style="margin:0; color:#C9D6E5 !important; font-size:12.5px; line-height:1.55;">Every LLM tool call gets a verdict before it runs. A red (block) spike means an out-of-bounds call — e.g. a query against a restricted data source — was stopped before it executed. A healthy system is mostly green, with blocks only when something is actually attempted.</p>
+        </div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Tool-Call Verdicts Over Time</title>
+      <chart>
+        <search>
+          <query>index=defenseclaw_audit action=inspect-tool-* agent_name="$agent_tok$" | timechart span=$span$ count by action</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.fieldColors">{"inspect-tool-allow":0x53A051,"inspect-tool-block":0xDC4E41,"inspect-tool-alert":0xF1813F,"inspect-tool-confirm":0xF8BE34}</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.axisTitleY.text">events</option>
+        <option name="charting.drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <html>
+        <div style="background:#22324A; border-left:5px solid #2E75B6; padding:12px 18px; border-radius:4px;">
+          <h3 style="margin:0 0 4px 0; color:#FFFFFF !important; font-size:14px;">Verdict mix per agent</h3>
+          <p style="margin:0; color:#C9D6E5 !important; font-size:12.5px; line-height:1.55;">The full allow/block breakdown for each agent (respects the filter). A workload that is mostly blocks, or one with a sudden block ratio change, stands out here.</p>
+        </div>
+      </html>
+    </panel>
+    <panel>
+      <html>
+        <div style="background:#22324A; border-left:5px solid #2E75B6; padding:12px 18px; border-radius:4px;">
+          <h3 style="margin:0 0 4px 0; color:#FFFFFF !important; font-size:14px;">Is the whole pipeline reporting? (fleet-wide)</h3>
+          <p style="margin:0; color:#C9D6E5 !important; font-size:12.5px; line-height:1.55;">The event mix across all sidecars confirms every part of DefenseClaw is emitting — inspections, verdicts, sessions, lifecycle, scans. A category dropping to zero is a blind spot. Not agent-filtered (lifecycle/scan events carry no agent_name).</p>
+        </div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Verdicts by Agent</title>
+      <chart>
+        <search>
+          <query>index=defenseclaw_audit action=inspect-tool-* agent_name="$agent_tok$" | eval Agent=coalesce(agent_name,"(unattributed)") | chart count over Agent by action</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.fieldColors">{"inspect-tool-allow":0x53A051,"inspect-tool-block":0xDC4E41,"inspect-tool-alert":0xF1813F,"inspect-tool-confirm":0xF8BE34}</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Audit Events by Category (fleet-wide)</title>
+      <chart>
+        <search>
+          <query>index=defenseclaw_audit | stats count as Events by sourcetype | rename sourcetype as Category | sort -Events</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.legend.placement">none</option>
+        <option name="charting.seriesColors">[0x2E75B6]</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <html>
+        <div style="background:#22324A; border-left:5px solid #2E75B6; padding:12px 18px; border-radius:4px;">
+          <h3 style="margin:0 0 4px 0; color:#FFFFFF !important; font-size:14px;">Security can't be slow</h3>
+          <p style="margin:0; color:#C9D6E5 !important; font-size:12.5px; line-height:1.55;">Each inspection adds latency before a tool call proceeds. Tracking <b>avg</b> and <b>p95</b> keeps the guardrail honest — it must stay fast enough not to drag on the agents it protects. A rising p95 is an early warning.</p>
+        </div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Inspect Latency Over Time (governance overhead)</title>
+      <chart>
+        <search>
+          <query>index=defenseclaw_audit action=inspect-tool-* agent_name="$agent_tok$" | rex field=details "elapsed=(?&lt;elapsed_ms&gt;[0-9.]+)ms" | timechart span=$span$ avg(elapsed_ms) as "Avg ms" p95(elapsed_ms) as "p95 ms"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.axisTitleY.text">milliseconds</option>
+        <option name="charting.chart">column</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.seriesColors">[0x2E75B6,0xF1813F]</option>
+        <option name="refresh.display">progressbar</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <html>
+        <div style="background:#22324A; border-left:5px solid #2E75B6; padding:12px 18px; border-radius:4px;">
+          <h3 style="margin:0 0 4px 0; color:#FFFFFF !important; font-size:14px;">The incident detail behind the counters</h3>
+          <p style="margin:0; color:#C9D6E5 !important; font-size:12.5px; line-height:1.55;">Every block and prompt-injection attempt with the agent that triggered it, the rule that fired, and its severity — the audit trail you'd hand a SOC reviewer. DefenseClaw redacts the actual query text, so only the matched rule is shown (correct privacy posture).</p>
+        </div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Security Forensics — Blocks &amp; Prompt-Injection Alerts</title>
+      <table>
+        <search>
+          <query>index=defenseclaw_audit (action=inspect-tool-block OR action=gateway-session-prompt-alert) agent_name="$agent_tok$" | eval Agent=coalesce(agent_name,"(unattributed)"), Kind=case(action="inspect-tool-block","tool-call blocked",action="gateway-session-prompt-alert","prompt-injection alert",true(),action) | rex field=details "severity=(?&lt;Severity&gt;\w+)" | rex field=details "(?&lt;Rule&gt;[A-Z][A-Z0-9_-]+):" | sort -_time | table _time Agent Kind Severity Rule</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+        <option name="wrap">true</option>
+        <format type="color" field="Severity">
+          <colorPalette type="map">{"HIGH":#DC4E41,"MEDIUM":#F1813F,"LOW":#F8BE34}</colorPalette>
+        </format>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <html>
+        <div style="background:#22324A; border-left:5px solid #2E75B6; padding:12px 18px; border-radius:4px;">
+          <h3 style="margin:0 0 4px 0; color:#FFFFFF !important; font-size:14px;">Is governance actually covering everything? (fleet-wide)</h3>
+          <p style="margin:0; color:#C9D6E5 !important; font-size:12.5px; line-height:1.55;">Confirms the DefenseClaw sidecars stay alive and connected across deploys. Repeated stop/start churn here means coverage is flapping — calls could slip through ungoverned during the gaps. Fleet-wide (lifecycle events carry no agent_name).</p>
+        </div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Sidecar Lifecycle &amp; Health (fleet-wide)</title>
+      <chart>
+        <search>
+          <query>index=defenseclaw_audit sourcetype=defenseclaw:lifecycle | timechart span=$span$ count by action</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.axisTitleY.text">events</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+</form>

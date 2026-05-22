@@ -1,0 +1,108 @@
+# CiliumNetworkPolicy — explicit egress allow-list for the kl-governance namespace.
+#
+# The workshop cluster runs Cilium with `enable-non-default-deny-policies: true`
+# + `enable-policy: default`, which in practice means pod-initiated outbound to
+# the internet is denied unless explicitly permitted by a policy. This file is
+# that policy.
+#
+# What's allowed:
+#   - Microsoft endpoints needed for Bot Framework JWT validation + bot replies
+#   - Anthropic API for the LLM calls openclaw makes
+#   - Splunk MCP via prod-telemetry.example.com (the splunk-triage MCP server)
+#   - kube-dns for DNS resolution (Cilium's FQDN policy NEEDS DNS allowed
+#     explicitly — the FQDN-to-IP mapping is done via the Cilium DNS proxy)
+#   - Pod-to-pod within the cluster (so openclaw ↔ defenseclaw-sidecar ↔
+#     msteams-bridge still talk to each other)
+#
+# Apply:
+#   kubectl apply -f k8s/cilium-egress-policy.yaml
+#
+# After apply, wait ~10s for Cilium to push the policy to nodes, then verify
+# from inside an openclaw pod:
+#   curl -kI https://login.botframework.com/v1/.well-known/openidconfiguration
+#   curl -kI https://api.anthropic.com/v1/
+#
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kl-governance-egress
+  namespace: kl-governance
+spec:
+  # Apply to ALL pods in the kl-governance namespace
+  endpointSelector: {}
+
+  egress:
+    # ---- BROAD ALLOW for cluster-external (testing-grade) ------------------
+    # Cilium's "world" entity = all destinations outside the cluster.
+    # This is intentionally broad while we validate Bot Framework end-to-end.
+    # Tighten later by removing this block and relying on the FQDN allow-list
+    # below (Microsoft + Anthropic + Splunk).
+    - toEntities:
+        - world
+
+    # ---- Microsoft (Bot Framework JWT validation + bot replies) -------------
+    # Kept for future narrow-mode use. Currently redundant with toEntities:world.
+    - toFQDNs:
+        - matchName: "login.botframework.com"
+        - matchName: "login.microsoftonline.com"
+        - matchPattern: "*.botframework.com"
+        - matchPattern: "*.microsoftonline.com"
+        - matchName: "smba.trafficmanager.net"
+        - matchPattern: "*.smba.trafficmanager.net"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+
+    # ---- Anthropic (LLM calls) ----------------------------------------------
+    - toFQDNs:
+        - matchName: "api.anthropic.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+
+    # ---- Splunk MCP via prod-telemetry (internal VPC IP) -------------------------------
+    # prod-telemetry.example.com's public IP isn't reachable from cluster pods; the
+    # cluster reaches prod-telemetry via its private VPC IP 10.0.0.11. Use toCIDR
+    # rather than toFQDNs so the policy doesn't depend on DNS resolving to
+    # the internal address.
+    - toCIDR:
+        - 10.0.0.11/32
+      toPorts:
+        - ports:
+            - port: "8089"
+              protocol: TCP
+
+    # ---- kube-dns (REQUIRED for FQDN policy resolution) --------------------
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+
+    # ---- Pod-to-pod within the cluster -------------------------------------
+    # Allows openclaw ↔ defenseclaw-sidecar ↔ msteams-bridge intercommunication
+    # (they share a Pod's net-ns so this is mostly loopback, but this also
+    # covers any future cluster-internal calls).
+    - toEndpoints:
+        - {}
+
+    # ---- triage-mcp server in net-triage-agent namespace -------------------
+    # The bot calls structured triage tools (list_active_alerts, get_alert,
+    # get_alert_history, get_recent_cycle) via mcp-remote → http://triage-mcp
+    # .net-triage-agent.svc:8081/sse. Encrypted in transit by Cilium WireGuard.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: net-triage-agent
+            app: triage-mcp
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP

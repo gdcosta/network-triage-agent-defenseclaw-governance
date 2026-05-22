@@ -1,0 +1,22 @@
+Network Triage Agent — DefenseClaw Governance
+Copyright (c) 2026 Gerry D'Costa
+
+This repository contains original governance artifacts (custom guardrail rules,
+OPA firewall allowlist, configuration, integration entrypoints, Kubernetes
+manifests, dashboard, and the agent system prompt) that build on the following
+third-party projects. Those projects are NOT redistributed here — this repo only
+references and configures them. Each retains its own license and copyright.
+
+- Cisco DefenseClaw (Cisco AI Defense)
+  License: Apache-2.0
+  Runtime guardrails, OPA policy engine, admission scanning, and audit sinks.
+  This repo's policies/ build on DefenseClaw's "strict" pack but do not include it.
+  Upstream: https://github.com/cisco-ai-defense/defenseclaw
+
+- OpenClaw
+  Self-hosted agent runtime and Microsoft Teams chat surface.
+  Upstream: https://github.com/openclaw/openclaw
+
+The sanitized example endpoints in this repo (Anthropic, Microsoft Bot Framework,
+GitHub, npm, Cisco AI Defense, etc.) are public service endpoints referenced for
+illustration of the egress allowlist; they imply no affiliation or endorsement.

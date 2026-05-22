@@ -1,0 +1,65 @@
+version: 1
+category: sensitive-splunk-index
+# Custom rule pack (task: out-of-bounds enforcement). The KL Triage Bot and
+# triage agent must ONLY query retail telemetry (index=main). Splunk's
+# internal indices — all underscore-prefixed (_audit, _internal,
+# _introspection, _thefishbucket, _telemetry, _configtracker, _metrics, ...)
+# — are out of bounds. _audit in particular holds search history + config
+# changes and is a prime recon/exfil target. These rules fire on the SPL
+# string in tool-call args; in strict mode (block_threshold=2 = MEDIUM+) a
+# HIGH verdict blocks the call before it ever reaches prod-telemetry.
+rules:
+  - id: SPL-INTERNAL-INDEX
+    # Matches `index=_audit`, `index = _internal`, `index="_audit"`,
+    # `index='_audit'` — any internal underscore-prefixed index.
+    pattern: 'index\s*=\s*["'']?_'
+    title: "Query targets an internal Splunk index (_audit, _internal, etc.) — out of bounds"
+    severity: HIGH
+    confidence: 0.9
+    tags: [splunk, governance, sensitive-index, out-of-bounds]
+
+  - id: SPL-INTERNAL-INDEX-IN
+    # `index IN (_audit, ...)` form — SPL's set-membership index filter.
+    pattern: 'index\s+IN\s*\([^)]*_'
+    title: "Query uses `index IN (...)` with an internal underscore index"
+    severity: HIGH
+    confidence: 0.85
+    tags: [splunk, governance, sensitive-index, out-of-bounds]
+
+  - id: SPL-TSTATS-INTERNAL-INDEX
+    # tstats / from forms that reference an internal index via WHERE.
+    pattern: '(?:tstats|from)\b[^|]*index\s*=\s*["'']?_'
+    title: "tstats/from query references an internal Splunk index"
+    severity: HIGH
+    confidence: 0.8
+    tags: [splunk, governance, sensitive-index, out-of-bounds]
+
+  - id: SPL-AUDIT-INDEX
+    # The DefenseClaw audit trail is NOT underscore-prefixed, so SPL-INTERNAL-INDEX
+    # misses it. No KL workload (agent/bot/triage-mcp) should ever read the
+    # governance audit index — reading it is a recon/exfil signal.
+    pattern: 'index\s*=\s*["'']?defenseclaw_audit'
+    title: "Query targets the DefenseClaw audit index (defenseclaw_audit) — out of bounds"
+    severity: HIGH
+    confidence: 0.9
+    tags: [splunk, governance, sensitive-index, out-of-bounds]
+
+  - id: SPL-RECON-COMMAND
+    # Index/metadata/REST enumeration = Splunk recon. The KL agent, bot, and
+    # triage-mcp are read-only telemetry consumers; none legitimately enumerate
+    # Splunk's catalog. (| rest is also blocked by the splunk-mcp server, but a
+    # DefenseClaw rule blocks it earlier with a visible audit event.)
+    pattern: '\|\s*(?:rest|eventcount|metadata|dbinspect)\b'
+    title: "Query uses a Splunk recon/enumeration command (| rest, | eventcount, | metadata, | dbinspect)"
+    severity: HIGH
+    confidence: 0.85
+    tags: [splunk, governance, recon, out-of-bounds]
+
+  - id: SPL-MUTATE-EXFIL-COMMAND
+    # Data mutation / code execution / exfiltration commands. All KL Splunk
+    # consumers are strictly read-only — these never appear in a legitimate query.
+    pattern: '\|\s*(?:delete|outputlookup|outputcsv|collect|tscollect|sendemail|script|runshellscript)\b'
+    title: "Query uses a mutating/exfil/code-exec SPL command (| delete, | outputlookup, | collect, | sendemail, | script)"
+    severity: CRITICAL
+    confidence: 0.9
+    tags: [splunk, governance, mutation, exfil, code-exec, out-of-bounds]

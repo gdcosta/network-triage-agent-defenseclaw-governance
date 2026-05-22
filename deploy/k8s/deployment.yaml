@@ -1,0 +1,308 @@
+# OpenClaw + DefenseClaw chat-surface deployment.
+#
+# Singleton workload: OpenClaw runs the Microsoft Teams bot via Bot
+# Framework; DefenseClaw sidecar inspects every LLM call and tool call
+# the agent makes. The plugin in OpenClaw assumes the sidecar is on
+# localhost — hence single Pod, two containers.
+#
+# This file is environment-agnostic — it contains NO site-specific values,
+# so `kubectl apply -f k8s/deployment.yaml` is safe to run anytime with no
+# edits (no sed dance). The two env-specific values live outside this file:
+#   - MSTEAMS_TENANT_ID  → Secret kl-governance-secrets (see secret.example.yaml)
+#   - BOT_HOSTNAME       → k8s/gateway.yaml             (see gateway.example.yaml)
+#
+# Prereqs:
+#   - Images at localhost:5000/{kl-openclaw,kl-defenseclaw-sidecar}:latest
+#   - Secret `kl-governance-secrets` exists (credentials + MSTEAMS_TENANT_ID)
+#   - Gateway/HTTPRoute applied once from k8s/gateway.yaml (TLS + host routing).
+#     That Cilium Gateway terminates HTTPS on :443 with the *.example.com
+#     wildcard cert; Bot Framework hits https://<BOT_HOSTNAME>/api/messages.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kl-governance
+  labels:
+    app.kubernetes.io/part-of: kl-triage
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openclaw-state
+  namespace: kl-governance
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: defenseclaw-state
+  namespace: kl-governance
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Non-sensitive, environment-agnostic tuning. Edit freely without touching the
+# Secret. (MSTEAMS_TENANT_ID is env-specific, so it lives in kl-governance-secrets
+# alongside the other Teams values — see k8s/secret.example.yaml.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kl-governance-config
+  namespace: kl-governance
+data:
+  MSTEAMS_DM_POLICY: "open"
+  MSTEAMS_ALLOW_FROM: "*"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kl-openclaw
+  namespace: kl-governance
+  labels:
+    app: kl-openclaw
+    component: chat-surface
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate         # singleton — never overlap two pods
+  selector:
+    matchLabels:
+      app: kl-openclaw
+  template:
+    metadata:
+      labels:
+        app: kl-openclaw
+        component: chat-surface
+    spec:
+      terminationGracePeriodSeconds: 30
+      # The Dockerfile chowns dirs at build time, but PVC mounts override
+      # that with root ownership. Minikube's hostpath provisioner doesn't
+      # honor fsGroup on its own — this initContainer fixes both PVCs to
+      # the uids the containers run as.
+      initContainers:
+        - name: fix-pvc-perms
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              chown -R 10001:10001 /openclaw-state
+              chown -R 10002:10002 /defenseclaw-state
+              echo "ownership fixed"
+              ls -la /openclaw-state /defenseclaw-state
+          securityContext:
+            runAsUser: 0      # needs root to chown
+          volumeMounts:
+            - name: openclaw-state
+              mountPath: /openclaw-state
+            - name: defenseclaw-state
+              mountPath: /defenseclaw-state
+      containers:
+        # --- OpenClaw chat gateway -----------------------------------------
+        - name: openclaw
+          image: localhost:5000/kl-openclaw:latest
+          imagePullPolicy: Always
+          # Secrets first (so a key collision in ConfigMap doesn't shadow)
+          envFrom:
+            - secretRef:
+                name: kl-governance-secrets
+            - configMapRef:
+                name: kl-governance-config
+          ports:
+            - name: gateway
+              containerPort: 18789
+            - name: msteams
+              containerPort: 3978
+          volumeMounts:
+            - name: openclaw-state
+              mountPath: /openclaw/.openclaw
+            # Bot's system prompt (the "SOUL"). Sourced from the
+            # kl-triage-bot-soul ConfigMap so iterating prompt content is
+            # ConfigMap edit + pod restart — no image rebuild.
+            - name: soul
+              mountPath: /opt/soul
+              readOnly: true
+            # Task #29: read the sidecar's exported identity (paired.json + .env)
+            # so the entrypoint's mirror script can update this container's
+            # paired.json before openclaw daemon starts.
+            - name: sidecar-identity
+              mountPath: /var/run/sidecar-identity
+              readOnly: true
+          # SOUL_PATH points the entrypoint at the mounted prompt file so it
+          # can be injected into openclaw's config / agent system prompt.
+          env:
+            - name: SOUL_PATH
+              value: /opt/soul/SOUL.md
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          # Loopback exec probes — OpenClaw's internal HTTP servers bind to
+          # 127.0.0.1 only (see e.g. "[browser/server] listening on http://127.0.0.1:18791/").
+          # A kubelet tcpSocket probe dials the pod IP and gets connection refused.
+          # bash's /dev/tcp builtin opens a TCP connection from inside the container,
+          # where 127.0.0.1 reaches those listeners.
+          livenessProbe:
+            exec:
+              command: ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/18789"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3978"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+        # --- msteams 0.0.0.0 bridge ---------------------------------------
+        # OpenClaw's msteams provider binds 127.0.0.1:3978 only and the schema
+        # has no knob to override (`channels.msteams.webhook` accepts {port,
+        # path} only — confirmed via `openclaw config schema`). This container
+        # listens on 0.0.0.0:8978 inside the pod's net-ns and forwards every
+        # connection to 127.0.0.1:3978 so the kube Service can route Bot
+        # Framework webhooks to the msteams provider.
+        - name: msteams-bridge
+          # Built from socat.Dockerfile in this repo, pushed to the
+          # in-cluster registry (minikube's node can't reach Docker Hub for
+          # arbitrary images, only localhost:5000). Tiny alpine + socat.
+          image: localhost:5000/kl-msteams-bridge:latest
+          imagePullPolicy: Always
+          args:
+            - "-d"
+            - "TCP-LISTEN:8978,bind=0.0.0.0,reuseaddr,fork"
+            - "TCP:127.0.0.1:3978"
+          ports:
+            - name: msteams-ext
+              containerPort: 8978
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          # tcpSocket probe — kubelet opens the connection itself, no in-container
+          # binary needed. socat binds 0.0.0.0:8978 so the pod-IP connection
+          # succeeds, which is the exact thing we want to validate (external
+          # reachability of the bridge).
+          readinessProbe:
+            tcpSocket:
+              port: msteams-ext
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+        # --- DefenseClaw sidecar ------------------------------------------
+        - name: defenseclaw-sidecar
+          image: localhost:5000/kl-defenseclaw-sidecar:latest
+          imagePullPolicy: Always
+          # Task #39: SPLUNK_HEC_TOKEN for the audit_sinks block in
+          # config.yaml — the daemon resolves it via splunk_hec.token_env
+          # to push every guardrail/inspect/scan audit event to log-telemetry HEC.
+          # Provision the secret with:
+          #   kubectl create secret generic kl-defenseclaw-secrets \
+          #     -n kl-governance \
+          #     --from-literal=SPLUNK_HEC_TOKEN='<HEC token from log-telemetry>'
+          envFrom:
+            - secretRef:
+                name: kl-defenseclaw-secrets
+          env:
+            # Per-pod identity for DefenseClaw audit attribution. All three
+            # sidecars share this image/config, so without this every event
+            # would carry agent_name=openclaw. The entrypoint appends these to
+            # config.yaml as a top-level agent: block.
+            - name: DEFENSECLAW_AGENT_ID
+              value: kl-openclaw
+            - name: DEFENSECLAW_AGENT_NAME
+              value: "KL Triage Bot"
+          ports:
+            - name: guardrail
+              containerPort: 4000
+            - name: sidecar-api
+              containerPort: 18970
+          volumeMounts:
+            - name: defenseclaw-state
+              mountPath: /defenseclaw/.defenseclaw
+            # Task #29: write the sidecar's identity (paired.json + .env with
+            # the auto-generated token) here so the openclaw container can
+            # read and mirror into its paired.json. Pod-local tmpfs.
+            - name: sidecar-identity
+              mountPath: /var/run/sidecar-identity
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # Same loopback issue as openclaw — sidecar's /health binds 127.0.0.1.
+          # httpGet probes dial the pod IP and get refused. Use exec+curl over loopback.
+          livenessProbe:
+            exec:
+              command: ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:18970/health"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:18970/health"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+      volumes:
+        - name: openclaw-state
+          persistentVolumeClaim:
+            claimName: openclaw-state
+        - name: defenseclaw-state
+          persistentVolumeClaim:
+            claimName: defenseclaw-state
+        - name: soul
+          configMap:
+            name: kl-triage-bot-soul
+        # Task #29: shared tmpfs between sidecar (writes its identity) and
+        # openclaw (reads it for the in-pod token mirror). Pod-local, never
+        # leaves the node's memory. Files written by sidecar (uid 10002)
+        # with mode 0644 so openclaw (uid 10001) can read them.
+        - name: sidecar-identity
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+---
+# Service for the msteams webhook (Bot Framework will POST here via the Gateway)
+apiVersion: v1
+kind: Service
+metadata:
+  name: kl-openclaw
+  namespace: kl-governance
+spec:
+  selector:
+    app: kl-openclaw
+  ports:
+    - name: msteams
+      port: 80
+      # Routes to the socat bridge (8978), which forwards to openclaw's
+      # loopback-only msteams provider (3978). See the msteams-bridge
+      # container above for why this indirection is needed.
+      targetPort: msteams-ext
+  type: ClusterIP
+# NOTE: the Gateway + HTTPRoute (which carry the env-specific BOT_HOSTNAME) live
+# in k8s/gateway.yaml — applied once, separately. They're not here so this file
+# stays placeholder-free and re-appliable without edits.

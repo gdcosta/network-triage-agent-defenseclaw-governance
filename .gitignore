@@ -1,0 +1,22 @@
+# This is a sanitized, public demo repo. Never commit real environment values.
+# Real, environment-specific manifests carrying live hostnames/IPs/tokens:
+k8s/gateway.yaml
+k8s/secret.yaml
+deploy/k8s/gateway.yaml
+deploy/k8s/secret.yaml
+*.local.yaml
+
+# Secrets / env
+.env
+*.env
+*.key
+*.pem
+
+# Tooling cruft
+.venv/
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+*.bak
+*.bak[0-9]

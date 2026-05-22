@@ -1,0 +1,408 @@
+# DefenseClaw sidecar config — task #30 observe-mode rollout.
+#
+# Adapted from the user's working Mac config at ~/.defenseclaw/config.yaml.
+# Paths translated to container layout (/defenseclaw/.defenseclaw — PVC mount).
+#
+# Key flags for this task:
+#   guardrail.enabled: true              ← THE flag that turns on inspection
+#   guardrail.mode:    observe           ← v1: log, don't block. Flip to "enforce" later
+#                                          via a one-line change here OR via the
+#                                          hot-reloadable guardrail_runtime.json.
+#   guardrail.rule_pack_dir: ''          ← empty = embedded defaults baked into the
+#                                          Go binary; we don't ship policies/
+#                                          (verified via docs/CONFIG_FILES.md
+#                                          "If a file is missing on disk,
+#                                          DefenseClaw falls back to the
+#                                          built-in embedded default").
+#   guardrail.judge.enabled: false       ← no LLM judge → no Anthropic key needed
+#                                          here. Local-regex inspection only for v1.
+#
+# Entrypoint always overwrites this file from the image copy (declarative —
+# config is policy-as-code, lives in git, not on the PVC). The companion
+# guardrail_runtime.json is write-if-missing so the hot-reload API state persists.
+
+data_dir: /defenseclaw/.defenseclaw
+environment: linux
+
+# Database / persistence paths — all under the PVC mount.
+audit_db: /defenseclaw/.defenseclaw/audit.db
+quarantine_dir: /defenseclaw/.defenseclaw/quarantine
+plugin_dir: /defenseclaw/.defenseclaw/plugins
+policy_dir: /defenseclaw/.defenseclaw/policies
+
+# Deployment metadata — unused by this build but accepted by the schema.
+tenant_id: ''
+workspace_id: ''
+deployment_mode: ''
+discovery_source: ''
+
+# LLM provider configs — left empty (no LLM judge in v1).
+llm:
+  model: ''
+  provider: ''
+  api_key: ''
+  api_key_env: ''
+  base_url: ''
+  timeout: 30
+  max_retries: 3
+default_llm_api_key_env: ''
+default_llm_model: ''
+inspect_llm:
+  provider: ''
+  model: ''
+  api_key: ''
+  api_key_env: ''
+  base_url: ''
+  timeout: 30
+  max_retries: 3
+
+# Cisco AI Defense external endpoint — disabled (no api_key configured).
+cisco_ai_defense:
+  endpoint: https://us.api.inspect.aidefense.security.cisco.com
+  api_key: ''
+  api_key_env: ''
+  timeout_ms: 3000
+  enabled_rules: []
+
+# Sister-product (OpenClaw) integration metadata.
+claw:
+  mode: openclaw
+  home_dir: /openclaw/.openclaw
+  config_file: /openclaw/.openclaw/openclaw.json
+  openclaw_home_original: ''
+
+# Scanner configs — keep defaults from Mac (won't actively run unless
+# defenseclaw-gateway scan is invoked explicitly).
+scanners:
+  skill_scanner:
+    binary: skill-scanner
+    use_llm: false
+    use_behavioral: false
+    enable_meta: false
+    use_trigger: false
+    use_virustotal: false
+    use_aidefense: false
+    llm_consensus_runs: 0
+    policy: permissive
+    lenient: true
+    virustotal_api_key: ''
+    virustotal_api_key_env: ''
+  mcp_scanner:
+    binary: mcp-scanner
+    analyzers: yara
+    scan_prompts: false
+    scan_resources: false
+    scan_instructions: false
+  codeguard: /defenseclaw/.defenseclaw/codeguard-rules
+
+# Openshell sandbox — not used in this deploy.
+openshell:
+  binary: openshell
+  policy_dir: /etc/openshell/policies
+  mode: ''
+  version: 0.6.2
+  sandbox_home: /home/sandbox
+  auto_pair: null
+  host_networking: false
+
+# Filesystem watcher — keep defaults, the daemon already runs this fine today.
+watch:
+  debounce_ms: 500
+  auto_block: true
+  allow_list_bypass_scan: true
+  rescan_enabled: true
+  rescan_interval_min: 60
+
+# Firewall config — not used in k8s (no pfctl/iptables hooks here).
+firewall:
+  config_file: /defenseclaw/.defenseclaw/firewall.yaml
+  rules_file: /defenseclaw/.defenseclaw/firewall.pf.conf
+  anchor_name: com.defenseclaw
+
+# ====================================================================
+# Guardrail — THE block this whole task is about.
+# ====================================================================
+guardrail:
+  enabled: true                   # ← inspection on
+  mode: action                    # ← v2 (2026-05-18): action = enforce. Was "observe"
+                                  #   during v1 validation. Valid modes per
+                                  #   internal/config/asset_policy.go and
+                                  #   internal/gateway/inspect_hooks.go are
+                                  #   "observe" (log only) and "action" (block).
+                                  #   Rollback: change to "observe" + rebuild
+                                  #   sidecar image + restart (or edit
+                                  #   guardrail_runtime.json hot-reload file).
+  scanner_mode: local             # local regex + (optionally) LLM judge
+  host: 127.0.0.1                 # guardrail proxy bind addr (intra-pod)
+  port: 4000                      # already exposed in deployment.yaml
+  model: ''
+  model_name: ''
+  api_key_env: ''
+  api_base: ''
+  original_model: ''
+  # Generic message returned to the agent/LLM when a tool call is blocked.
+  # MUST stay generic — when empty, DefenseClaw falls back to a default that
+  # includes the matched rule id/reason, which the bot then parrots to users
+  # (leaked "SPL-AUDIT-INDEX"). A fixed string means the LLM never sees rule
+  # internals and can't disclose them. Keep it user-facing and non-revealing.
+  block_message: 'This request was blocked by security policy and was not executed. If you believe you have a legitimate need for this data, contact your security administrator.'
+  judge:
+    enabled: false                # ← v1: no LLM judge (no Anthropic key here)
+    injection: true
+    pii: true
+    pii_prompt: true
+    pii_completion: true
+    tool_injection: true
+    exfil: true
+    timeout: 30.0
+    model: ''
+    api_key_env: ''
+    api_base: ''
+    fallbacks: []
+    adjudication_timeout: 5.0
+  detection_strategy: regex_judge
+  detection_strategy_prompt: ''
+  detection_strategy_completion: ''
+  detection_strategy_tool_call: ''
+  judge_sweep: true
+  rule_pack_dir: /defenseclaw/.defenseclaw/policies/guardrail/strict   # ← task #38: strict rule pack
+  connector: openclaw
+  hilt:
+    enabled: false                # human-in-the-loop disabled
+    min_severity: HIGH
+  codex_enforcement_enabled: false
+  claudecode_enforcement_enabled: false
+  hook_fail_mode: open
+
+# OpenTelemetry export — disabled in v1 (we already ship stdout JSONL via
+# the cluster's OTel DaemonSet, no need for DefenseClaw's own export path).
+otel:
+  enabled: false
+  protocol: grpc
+  endpoint: ''
+  headers: {}
+  tls:
+    insecure: false
+    ca_cert: ''
+  traces:
+    enabled: true
+    sampler: always_on
+    sampler_arg: '1.0'
+    endpoint: ''
+    protocol: ''
+    url_path: ''
+  logs:
+    enabled: true
+    emit_individual_findings: false
+    endpoint: ''
+    protocol: ''
+    url_path: ''
+  metrics:
+    enabled: true
+    export_interval_s: 60
+    endpoint: ''
+    protocol: ''
+    url_path: ''
+  batch:
+    max_export_batch_size: 512
+    scheduled_delay_ms: 5000
+    max_queue_size: 2048
+  resource:
+    attributes: {}
+
+# Gateway block — connection to the OpenClaw daemon at 127.0.0.1:18789.
+# device_key_file is what task #29's mirror logic depends on.
+gateway:
+  host: 127.0.0.1
+  port: 18789
+  api_bind: ''
+  token_env: DEFENSECLAW_GATEWAY_TOKEN   # matches the auto-generated .env var
+  device_key_file: /defenseclaw/.defenseclaw/device.key
+  auto_approve_safe: false
+  reconnect_ms: 800
+  max_reconnect_ms: 15000
+  approval_timeout_s: 30
+  api_port: 18970
+  watcher:
+    enabled: true
+    skill:
+      enabled: true
+      take_action: false
+      dirs: []
+    plugin:
+      enabled: true
+      take_action: false
+      dirs: []
+
+# Action defaults per severity — kept permissive in v1 ("enable runtime, don't
+# block on install") so guardrail's observe-mode warnings don't accidentally
+# yank a plugin. Tighten when we flip to enforce.
+skill_actions:
+  critical: { file: none, runtime: enable, install: none }
+  high:     { file: none, runtime: enable, install: none }
+  medium:   { file: none, runtime: enable, install: none }
+  low:      { file: none, runtime: enable, install: none }
+  info:     { file: none, runtime: enable, install: none }
+mcp_actions:
+  critical: { file: none, runtime: enable, install: block }
+  high:     { file: none, runtime: enable, install: block }
+  medium:   { file: none, runtime: enable, install: none }
+  low:      { file: none, runtime: enable, install: none }
+  info:     { file: none, runtime: enable, install: none }
+plugin_actions:
+  critical: { file: none, runtime: enable, install: none }
+  high:     { file: none, runtime: enable, install: none }
+  medium:   { file: none, runtime: enable, install: none }
+  low:      { file: none, runtime: enable, install: none }
+  info:     { file: none, runtime: enable, install: none }
+
+webhooks: []
+
+# ====================================================================
+# Audit sinks — task #39. Forward DefenseClaw audit events (guardrail
+# verdicts, [inspect] tool decisions, scan results, blocks) to log-telemetry
+# Splunk via HEC for the governance dashboard.
+#
+# DefenseClaw ships default sourcetypes:
+#   - defenseclaw:verdict  ← guardrail LLM-call verdicts
+#   - defenseclaw:judge    ← LLM-judge decisions (when enabled)
+# Plus a generic sourcetype for other audit-action events.
+#
+# Token is injected via env (SPLUNK_HEC_TOKEN), populated from a k8s
+# Secret (kl-defenseclaw-secrets) mounted into the sidecar container.
+# Never inline the token here.
+# ====================================================================
+audit_sinks:
+  - name: log-telemetry-splunk-hec
+    kind: splunk_hec
+    enabled: true
+    # Send everything for the dashboard MVP — filter at dashboard SPL level.
+    # Once we see the event volume, can tighten via min_severity + actions.
+    min_severity: ""
+    actions: []
+    # Batching: small enough to feel ~realtime in the dashboard, big enough
+    # to not hammer log-telemetry. 50 events/flush or 5s, whichever hits first.
+    batch_size: 50
+    flush_interval_s: 5
+    timeout_s: 10
+    splunk_hec:
+      # Internal IP per task #38 firewall allowlist (also have log-telemetry.example.com
+      # there for parity). Port 8088 is the standard HEC port. NOTE: log-telemetry's
+      # HEC is serving plain HTTP (SSL disabled in HEC Global Settings); using
+      # https:// here yields `http: server gave HTTP response to HTTPS client`
+      # from the Go client. Verified empirically 2026-05-18 via sidecar log.
+      # If the admin later enables HEC SSL, flip back to https:// and set
+      # verify_tls=false (for self-signed) or true (for properly-issued cert).
+      endpoint: http://10.0.0.12:8088/services/collector
+      token_env: SPLUNK_HEC_TOKEN
+      index: defenseclaw_audit
+      source: defenseclaw-sidecar
+      verify_tls: false   # irrelevant for http:// but kept for when SSL is re-enabled
+      # Explicit per-action sourcetype mapping. Without these, anything other
+      # than `guardrail-verdict` (defenseclaw:verdict) and `llm-judge-response`
+      # (defenseclaw:judge) gets Splunk-auto-detected as `_json` — useless for
+      # building scoped dashboard panels. Action names sourced from grep over
+      # internal/audit/ + internal/gateway/ in defenseclaw 0.5.0 source.
+      sourcetype_overrides:
+        # tool-call inspections (the [inspect] log lines we already validated)
+        guardrail-tool-call-inspect:     defenseclaw:inspect
+        guardrail-tool-call-parse-error: defenseclaw:inspect
+        guardrail-inspection:            defenseclaw:inspect
+        inspect-reveal:                  defenseclaw:inspect
+        # Per-verdict inspect audit events (4 inspect families × 4 verdicts).
+        # Discovered empirically 2026-05-18 after task #41 — these dominate
+        # event volume on the triage-agent's proxy (one per prod-telemetry query
+        # inspected). Dashboard can filter on action=*-block / *-alert /
+        # *-confirm to break out by verdict within the inspect sourcetype.
+        # /api/v1/inspect/tool family (proxy → daemon per tool call):
+        inspect-tool-allow:              defenseclaw:inspect
+        inspect-tool-block:              defenseclaw:inspect
+        inspect-tool-confirm:            defenseclaw:inspect
+        inspect-tool-alert:              defenseclaw:inspect
+        # /api/v1/inspect/tool-response family (post-upstream output inspection):
+        inspect-tool-response-allow:     defenseclaw:inspect
+        inspect-tool-response-block:     defenseclaw:inspect
+        inspect-tool-response-confirm:   defenseclaw:inspect
+        inspect-tool-response-alert:     defenseclaw:inspect
+        # /api/v1/inspect/request family (LLM prompt inspection, openclaw side):
+        inspect-request-allow:           defenseclaw:inspect
+        inspect-request-block:           defenseclaw:inspect
+        inspect-request-confirm:         defenseclaw:inspect
+        inspect-request-alert:           defenseclaw:inspect
+        # /api/v1/inspect/response family (LLM completion inspection, openclaw):
+        inspect-response-allow:          defenseclaw:inspect
+        inspect-response-block:          defenseclaw:inspect
+        inspect-response-confirm:        defenseclaw:inspect
+        inspect-response-alert:          defenseclaw:inspect
+        # explicit OPA policy verdicts
+        guardrail-opa-verdict:           defenseclaw:opa
+        # enforcement actions — block, unblock, force-allow
+        block:                           defenseclaw:block
+        api-enforce-block:               defenseclaw:block
+        api-enforce-unblock:             defenseclaw:block
+        api-enforce-allow:               defenseclaw:block
+        # security scans of plugins / MCPs / skills (incl. periodic rescans)
+        api-mcp-scan:                    defenseclaw:scan
+        api-plugin-scan:                 defenseclaw:scan
+        api-skill-scan:                  defenseclaw:scan
+        rescan:                          defenseclaw:scan
+        rescan-start:                    defenseclaw:scan
+        # plugin/skill admission decisions
+        admission:                       defenseclaw:admission
+        allow:                           defenseclaw:admission
+        # drift detection — state of installed assets changed
+        # (dedicated sourcetype; this is a security-relevant signal worth
+        #  isolating in the dashboard from routine lifecycle noise)
+        drift:                           defenseclaw:drift
+        # daemon + subsystem lifecycle events
+        booting:                         defenseclaw:lifecycle
+        guardrail-start:                 defenseclaw:lifecycle
+        guardrail-healthy:               defenseclaw:lifecycle
+        sidecar-start:                   defenseclaw:lifecycle
+        sidecar-stop:                    defenseclaw:lifecycle
+        sidecar-connected:               defenseclaw:lifecycle
+        watch-start:                     defenseclaw:lifecycle
+        watch-stop:                      defenseclaw:lifecycle
+        # config + policy reloads
+        api-config-patch:                defenseclaw:config
+        guardrail-config-reload:         defenseclaw:config
+        policy-reload:                   defenseclaw:config
+        # plugin/skill enable/disable/fetch state changes + install detection
+        api-plugin-enable:               defenseclaw:asset
+        api-plugin-disable:              defenseclaw:asset
+        api-skill-enable:                defenseclaw:asset
+        api-skill-disable:               defenseclaw:asset
+        api-skill-fetch:                 defenseclaw:asset
+        install-detected:                defenseclaw:asset
+        install-scan-error:              defenseclaw:asset
+        # chat session events (gateway-session-* family, internal/gateway/router.go)
+        gateway-session-message:         defenseclaw:session
+        gateway-session-prompt-alert:    defenseclaw:session   # prompt-inspection alert (e.g. injection attempt) — was falling through to _json
+        gateway-session-error:           defenseclaw:session   # session stream error — proactively mapped (same family)
+        # other guardrail mechanics
+        guardrail-launder:               defenseclaw:guardrail
+        guardrail-notify-inject:         defenseclaw:guardrail
+      # sourcetype_overrides not needed — defaults (defenseclaw:verdict for
+      # guardrail verdicts, defenseclaw:judge for judge events) are what the
+      # out-of-the-box DefenseClaw dashboards expect.
+
+# AI discovery (file-system scanning for AI tools) — disabled in k8s.
+# Inherited the schema from the Mac config but no scan roots set.
+ai_discovery:
+  enabled: false
+  mode: enhanced
+  scan_interval_min: 5
+  process_interval_s: 60
+  scan_roots: []
+  signature_packs: []
+  allow_workspace_signatures: false
+  disabled_signature_ids: []
+  include_shell_history: false
+  include_package_manifests: false
+  include_env_var_names: false
+  include_network_domains: false
+  max_files_per_scan: 1000
+  max_file_bytes: 524288
+  emit_otel: false
+  store_raw_local_paths: false
+  confidence_policy_path: /defenseclaw/.defenseclaw/confidence.yaml
