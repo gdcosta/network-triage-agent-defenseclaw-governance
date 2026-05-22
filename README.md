@@ -41,7 +41,7 @@ The point of this repo is that **no single control is trusted** — each is back
 flowchart LR
     U[SOC user · Teams] --> BOT[Chat bot · OpenClaw]
     AG[Triage agent · 30s loop]
-    subgraph POD[in-pod, same network namespace]
+    subgraph POD["in-pod, same network namespace"]
       BOT -. LLM prompt .-> GR[DefenseClaw guardrail<br/>inspects prompt + completion]
       AG  -. LLM prompt .-> GR
       BOT -. tool call .-> PX[DefenseClaw MCP proxy<br/>inspects tool call · holds the token]
