@@ -17,13 +17,21 @@ The point of this repo is that **no single control is trusted** — each is back
 
 ## Layered defense
 
-| Layer | Control | Where |
-|---|---|---|
-| 1. **Scope (won't)** | System prompt (`SOUL.md`) constrains the bot to network triage, refuses off-scope requests, and never names internal rules/engines | `deploy/k8s/soul-configmap.yaml` |
-| 2. **Runtime governance (shouldn't, recorded)** | DefenseClaw inspects **every LLM prompt and tool call** before it runs (`mode: action`); custom guardrail rules + OPA firewall; emits an audit trail | `policies/`, `deploy/defenseclaw-config.example.yaml` |
-| 3. **Least privilege (can't)** | A distinct Splunk service account per workload, each scoped to a single index — phrasing-proof, enforced server-side | Splunk RBAC (described below) |
-| 4. **Network egress lockdown** | Cilium egress policy — the agent can only reach its allowlisted endpoints | `deploy/k8s/cilium-egress-policy.yaml` |
-| 5. **Credential isolation** | The Splunk token lives **only** in the DefenseClaw sidecar's MCP proxy, never in the agent; per-pod audit identity | `deploy/k8s/deployment.yaml`, `deploy/defenseclaw-entrypoint.sh` |
+Ordered weakest-self-restraint → strongest server-side enforcement. Read bottom-up if you want "the LLM can be talked out of it" first; top-down if you want the authoritative layer first. **No single control is trusted** — each is backstopped by the next.
+
+| Tier | Control | Verb | Where |
+|---|---|---|---|
+| **5. Splunk RBAC** | A distinct Splunk service account per workload, each scoped to a single index — phrasing-proof, enforced server-side | "**Can't**" | Splunk role config (described below) |
+| **4. Identity & credential boundary** | The Splunk token lives **only** in the DefenseClaw sidecar's MCP proxy, never in the agent; per-pod audit identity for attribution + independent revocation | "**Wasn't you**" | `deploy/k8s/deployment.yaml`, `deploy/defenseclaw-entrypoint.sh` |
+| **3. Runtime governance (DefenseClaw)** | Inspects **every LLM prompt and tool call** before it runs (`mode: action`); custom guardrail rules + OPA firewall | "**Shouldn't (recorded)**" | `policies/`, `deploy/defenseclaw-config.example.yaml` |
+| **2. Network egress lockdown** | Cilium egress policy — pods can only reach allowlisted endpoints (Anthropic, the Splunk hosts, Microsoft Bot Framework) | "**Can't reach**" | `deploy/k8s/cilium-egress-policy.yaml` |
+| **1. Scope (SOUL.md)** | System prompt constrains the bot to network triage, refuses off-scope requests, never names internal rules/engines. LLM-side — prompt-injectable, so it's the *first* line, not the last | "**Won't**" | `deploy/k8s/soul-configmap.yaml` |
+| **0. Cluster substrate** | Kubernetes Secrets (not env-in-image), TLS to all external services, **Cilium WireGuard** pod-to-pod encryption | Table stakes | Cluster-level |
+| **cross-cutting** | Audit trail to a dedicated index — every guardrail verdict (allow / block / prompt-alert) recorded with attribution | "**And we'll know**" | `dashboard/defenseclaw-governance.xml` |
+
+**DefenseClaw is two enforcement points, not one** — call them out separately:
+- **LLM-proxy** on the chat bot: inspects prompts + completions on the way to the model API.
+- **Inspect API** on the agent's MCP proxy: inspects *tool calls* before they reach Splunk.
 
 ### The custom guardrail rules (layer 2)
 
