@@ -8,7 +8,9 @@
 # What's allowed:
 #   - Microsoft endpoints needed for Bot Framework JWT validation + bot replies
 #   - Anthropic API for the LLM calls openclaw makes
+#   - npm registry (npx -y mcp-remote resolves the package on every start)
 #   - Splunk MCP via prod-telemetry.example.com (the splunk-triage MCP server)
+#   - log-telemetry HEC (10.0.0.12:8088) for the DefenseClaw audit sink + health probe
 #   - kube-dns for DNS resolution (Cilium's FQDN policy NEEDS DNS allowed
 #     explicitly — the FQDN-to-IP mapping is done via the Cilium DNS proxy)
 #   - Pod-to-pod within the cluster (so openclaw ↔ defenseclaw-sidecar ↔
@@ -32,16 +34,12 @@ spec:
   endpointSelector: {}
 
   egress:
-    # ---- BROAD ALLOW for cluster-external (testing-grade) ------------------
-    # Cilium's "world" entity = all destinations outside the cluster.
-    # This is intentionally broad while we validate Bot Framework end-to-end.
-    # Tighten later by removing this block and relying on the FQDN allow-list
-    # below (Microsoft + Anthropic + Splunk).
-    - toEntities:
-        - world
-
     # ---- Microsoft (Bot Framework JWT validation + bot replies) -------------
-    # Kept for future narrow-mode use. Currently redundant with toEntities:world.
+    # NOTE: this is now the enforced allow-list (the broad `toEntities: world`
+    # block was removed). FQDN egress relies on Cilium's DNS proxy — kube-dns must
+    # be allowed (below) AND the workload must resolve these by name (the Bot
+    # Framework SDK does). If a bot reply ever fails after this, find the blocked
+    # FQDN via `hubble observe --namespace kl-governance --type drop` and add it.
     - toFQDNs:
         - matchName: "login.botframework.com"
         - matchName: "login.microsoftonline.com"
@@ -62,6 +60,19 @@ spec:
             - port: "443"
               protocol: TCP
 
+    # ---- npm registry (npx -y mcp-remote needs it) --------------------------
+    # The bot spawns its MCP servers via `npx -y mcp-remote ...`; npx contacts the
+    # registry to resolve the package version on every start, even when cached.
+    # Without it npx hangs 30s and the MCP servers fail to register, so the bot
+    # loses its tools. FOLLOW-UP: move the bot to the mcp-remote BINARY directly
+    # and DROP this rule — npm egress is supply-chain surface to avoid.
+    - toFQDNs:
+        - matchName: "registry.npmjs.org"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+
     # ---- Splunk MCP via prod-telemetry (internal VPC IP) -------------------------------
     # prod-telemetry.example.com's public IP isn't reachable from cluster pods; the
     # cluster reaches prod-telemetry via its private VPC IP 10.0.0.11. Use toCIDR
@@ -72,6 +83,18 @@ spec:
       toPorts:
         - ports:
             - port: "8089"
+              protocol: TCP
+
+    # ---- log-telemetry HEC (DefenseClaw audit sink + health probe) ----------
+    # The bot's DefenseClaw sidecar POSTs audit events + the periodic health
+    # probe to log-telemetry's HTTP Event Collector. Internal VPC IP, HEC port
+    # 8088 (HTTP, not HTTPS). Without it, dropping `world` silently stops bot
+    # events reaching the governance dashboard.
+    - toCIDR:
+        - 10.0.0.12/32
+      toPorts:
+        - ports:
+            - port: "8088"
               protocol: TCP
 
     # ---- kube-dns (REQUIRED for FQDN policy resolution) --------------------
