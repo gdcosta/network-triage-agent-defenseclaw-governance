@@ -77,6 +77,11 @@ The dashboard surfaces it as a prompt-injection alert attributed to the bot, wit
 
 ## What's in this repo
 
+[`AGENT-BEST-PRACTICES.md`](AGENT-BEST-PRACTICES.md) — generalized lessons
+distilled from this build (credentials, defense-in-depth, prompt design,
+Kubernetes/MCP gotchas). The *why* behind the design, written to transfer to any
+agent stack.
+
 ```
 policies/
   sensitive-splunk-index.yaml   Custom guardrail rules (SPL index/recon/mutate)
